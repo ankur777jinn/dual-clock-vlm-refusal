@@ -40,6 +40,7 @@ def main():
     parser.add_argument("--L-harm", type=int, required=True, help="L_harm from Phase 1")
     parser.add_argument("--run-nonsafety", action="store_true", help="Also run non-safety grid")
     parser.add_argument("--judge", action="store_true", help="Run judge evaluation on completions")
+    parser.add_argument("--judge-model", type=str, default=None, help="Local HF judge model (e.g. meta-llama/Meta-Llama-3.1-8B-Instruct or Qwen/Qwen2.5-7B-Instruct)")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -89,10 +90,35 @@ def main():
         nonsafety_df.to_parquet(args.output_dir / f"nonsafety_grid_{args.split}.parquet")
 
     if args.judge:
-        logger.info("Running judge evaluation...")
-        judge = JudgeEvaluator(Config.PRIMARY_JUDGE, Config.BACKUP_JUDGE)
-        # Judge only generated completions (not just logit mass)
-        logger.info("Judge evaluation requires generated completions — run with generation enabled.")
+        logger.info("Running judge evaluation on generated completions...")
+        local_judge = None
+        local_tok = None
+        if args.judge_model:
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            logger.info("Loading local judge model: %s", args.judge_model)
+            local_tok = AutoTokenizer.from_pretrained(args.judge_model)
+            local_judge = AutoModelForCausalLM.from_pretrained(
+                args.judge_model, torch_dtype=torch.bfloat16, device_map=args.device
+            )
+
+        judge = JudgeEvaluator(
+            primary_judge=Config.PRIMARY_JUDGE,
+            backup_judge=Config.BACKUP_JUDGE,
+            local_model=local_judge,
+            local_tokenizer=local_tok,
+        )
+
+        labels = []
+        for _, row in results_df.iterrows():
+            prompt_text = Config.PROMPT
+            gen_text = row.get("generated_text", "")
+            lbl = judge.judge_single(prompt_text, gen_text)
+            labels.append(lbl)
+
+        results_df["judge_label"] = labels
+        results_df.to_parquet(args.output_dir / f"grid_results_{args.split}.parquet")
+        logger.info("Saved judge evaluations to grid results parquet: %s",
+                    args.output_dir / f"grid_results_{args.split}.parquet")
 
     logger.info("Phase 2 grid execution complete.")
 
