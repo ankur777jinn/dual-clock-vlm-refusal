@@ -27,6 +27,61 @@ import torch.nn as nn
 logger = logging.getLogger(__name__)
 
 
+def get_decoder_layers(model: nn.Module) -> nn.ModuleList:
+    """Dynamically resolve the 28 decoder layers across transformers versions.
+
+    In transformers >= 4.49 / 5.x for Qwen2.5-VL:
+      model.model.language_model.layers OR
+      model.language_model.layers OR
+      model.model.layers
+    """
+    candidates = [
+        ("model", "language_model", "layers"),
+        ("language_model", "layers"),
+        ("model", "layers"),
+        ("layers",),
+    ]
+    for path in candidates:
+        curr = model
+        for part in path:
+            curr = getattr(curr, part, None)
+            if curr is None:
+                break
+        if curr is not None and isinstance(curr, (nn.ModuleList, list)) and len(curr) > 0:
+            return curr
+
+    # Fallback: traverse named modules for any ModuleList named 'layers' with decoder layers
+    for name, module in model.named_modules():
+        if name.endswith("layers") and isinstance(module, nn.ModuleList) and len(module) in (28, 32, 36, 48, 64, 80):
+            return module
+
+    raise AttributeError("Could not locate decoder layers in model architecture.")
+
+
+def get_embed_tokens(model: nn.Module) -> nn.Module:
+    """Dynamically resolve the token embedding module across transformers versions."""
+    candidates = [
+        ("model", "language_model", "embed_tokens"),
+        ("language_model", "embed_tokens"),
+        ("model", "embed_tokens"),
+        ("embed_tokens",),
+    ]
+    for path in candidates:
+        curr = model
+        for part in path:
+            curr = getattr(curr, part, None)
+            if curr is None:
+                break
+        if curr is not None and isinstance(curr, nn.Module):
+            return curr
+
+    for name, module in model.named_modules():
+        if "embed_tokens" in name and isinstance(module, nn.Embedding):
+            return module
+
+    raise AttributeError("Could not locate embed_tokens module in model architecture.")
+
+
 def get_image_token_indices(
     input_ids: torch.Tensor,
     image_token_id: int,
@@ -88,8 +143,9 @@ def extract_hidden_states(
             captured[layer_idx] = hs.detach().clone()
         return _hook
 
+    layers_list = get_decoder_layers(model)
     for idx in layers:
-        h = model.model.layers[idx].register_forward_hook(_make_hook(idx))
+        h = layers_list[idx].register_forward_hook(_make_hook(idx))
         hooks.append(h)
 
     try:
@@ -162,19 +218,39 @@ class AttentionKnockoutHook:
         def _make_pre_hook(layer_idx: int):
             def _pre_hook(module, args, kwargs):
                 attn_mask_key = "attention_mask"
+                mask = None
+                is_kwarg = False
                 if attn_mask_key in kwargs and kwargs[attn_mask_key] is not None:
                     mask = kwargs[attn_mask_key].clone()
+                    is_kwarg = True
+                elif len(args) > 1 and args[1] is not None:
+                    mask = args[1].clone()
+                    is_kwarg = False
+
+                if mask is not None:
                     min_val = torch.finfo(mask.dtype).min
                     # Knockout: text queries → image keys
-                    for tpos in txt_positions:
-                        mask[:, :, tpos, img_positions] = min_val
-                    kwargs[attn_mask_key] = mask
+                    if mask.dim() == 4:
+                        for tpos in txt_positions:
+                            mask[:, :, tpos, img_positions] = min_val
+                    elif mask.dim() == 2:
+                        b, s = mask.shape
+                        expanded = mask[:, None, None, :].expand(b, 1, s, s).clone()
+                        for tpos in txt_positions:
+                            expanded[:, :, tpos, img_positions] = min_val
+                        mask = expanded
+
+                    if is_kwarg:
+                        kwargs[attn_mask_key] = mask
+                    else:
+                        args = (args[0], mask) + args[2:]
                 return args, kwargs
             return _pre_hook
 
-        n_layers = len(self.model.model.layers)
+        layers_list = get_decoder_layers(self.model)
+        n_layers = len(layers_list)
         for idx in range(self.start_layer, n_layers):
-            h = self.model.model.layers[idx].register_forward_pre_hook(
+            h = layers_list[idx].register_forward_pre_hook(
                 _make_pre_hook(idx), with_kwargs=True
             )
             self._hooks.append(h)
@@ -272,10 +348,11 @@ class BackPatchHook:
                 return (hs,) + output[1:]
             return hs
 
+        layers_list = get_decoder_layers(self.model)
         if dst == 0:
-            hook_target = self.model.model.embed_tokens
+            hook_target = get_embed_tokens(self.model)
         else:
-            hook_target = self.model.model.layers[dst - 1]
+            hook_target = layers_list[dst - 1]
 
         h = hook_target.register_forward_hook(_inject_hook)
         try:
@@ -312,10 +389,11 @@ class BackPatchHook:
         src_hs = states[layer][:, image_token_indices, :].clone()
 
         # Re-inject at same position
+        layers_list = get_decoder_layers(model)
         if layer == 0:
-            hook_target = model.model.embed_tokens
+            hook_target = get_embed_tokens(model)
         else:
-            hook_target = model.model.layers[layer - 1]
+            hook_target = layers_list[layer - 1]
 
         def _identity_hook(_module, _input, output):
             hs = output[0] if isinstance(output, tuple) else output
@@ -468,10 +546,11 @@ class PrefillRunner:
         src_acts = patcher.capture_source(inputs)
 
         _call_count = [0]
+        layers_list = get_decoder_layers(self.model)
         if dst_layer == 0:
-            hook_target = self.model.model.embed_tokens
+            hook_target = get_embed_tokens(self.model)
         else:
-            hook_target = self.model.model.layers[dst_layer - 1]
+            hook_target = layers_list[dst_layer - 1]
 
         def _inject_once(_module, _input, output):
             _call_count[0] += 1
@@ -497,3 +576,131 @@ class PrefillRunner:
         return self.processor.tokenizer.decode(
             output_ids[0, input_len:], skip_special_tokens=True
         )
+
+    def run_clean(
+        self,
+        model=None,
+        processor=None,
+        image=None,
+        prompt: str = None,
+        device=None,
+        max_new_tokens: int = 48,
+    ) -> dict:
+        """Run unpatched forward pass: compute M and generate text."""
+        from PIL import Image as PILImage
+        from pathlib import Path
+        if isinstance(image, (str, Path)):
+            image = PILImage.open(image).convert("RGB")
+
+        from src.config import Config
+        from src.utils import compute_logit_mass
+        tok = self.processor.tokenizer
+        ref_ids = [tok.convert_tokens_to_ids(t) for t in Config.REFUSAL_TOKENS if tok.convert_tokens_to_ids(t) is not None]
+        comp_ids = [tok.convert_tokens_to_ids(t) for t in Config.COMPLIANCE_TOKENS if tok.convert_tokens_to_ids(t) is not None]
+        if not ref_ids:
+            ref_ids = [tok.encode("I")[0], tok.encode("Sorry")[0]]
+        if not comp_ids:
+            comp_ids = [tok.encode("Sure")[0], tok.encode("Here")[0]]
+
+        inputs = self._prepare_inputs(image, prompt)
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            output_ids = self.model.generate(
+                **inputs, max_new_tokens=max_new_tokens, do_sample=False
+            )
+        logits = outputs.logits[:, -1, :]
+        M = compute_logit_mass(logits.squeeze(0), ref_ids, comp_ids)
+        input_len = inputs["input_ids"].shape[1]
+        text = self.processor.tokenizer.decode(
+            output_ids[0, input_len:], skip_special_tokens=True
+        )
+        return {"M": M, "generated_text": text}
+
+    def capture_source(
+        self,
+        model=None,
+        processor=None,
+        image=None,
+        prompt: str = None,
+        layer: int = 0,
+        device=None,
+    ) -> torch.Tensor:
+        """Capture source activations at specified layer."""
+        from PIL import Image as PILImage
+        from pathlib import Path
+        if isinstance(image, (str, Path)):
+            image = PILImage.open(image).convert("RGB")
+        inputs = self._prepare_inputs(image, prompt)
+        img_indices = self._get_image_indices(inputs["input_ids"])
+        patcher = BackPatchHook(self.model, layer, max(0, layer - 1), img_indices)
+        return patcher.capture_source(inputs)
+
+    def run_patched(
+        self,
+        model=None,
+        processor=None,
+        image=None,
+        prompt: str = None,
+        source_activation: torch.Tensor = None,
+        dst_layer: int = 0,
+        device=None,
+        max_new_tokens: int = 48,
+    ) -> dict:
+        """Run patched forward pass: compute M and generate text."""
+        from PIL import Image as PILImage
+        from pathlib import Path
+        if isinstance(image, (str, Path)):
+            image = PILImage.open(image).convert("RGB")
+
+        from src.config import Config
+        from src.utils import compute_logit_mass
+        tok = self.processor.tokenizer
+        ref_ids = [tok.convert_tokens_to_ids(t) for t in Config.REFUSAL_TOKENS if tok.convert_tokens_to_ids(t) is not None]
+        comp_ids = [tok.convert_tokens_to_ids(t) for t in Config.COMPLIANCE_TOKENS if tok.convert_tokens_to_ids(t) is not None]
+        if not ref_ids:
+            ref_ids = [tok.encode("I")[0], tok.encode("Sorry")[0]]
+        if not comp_ids:
+            comp_ids = [tok.encode("Sure")[0], tok.encode("Here")[0]]
+
+        inputs = self._prepare_inputs(image, prompt)
+        img_indices = self._get_image_indices(inputs["input_ids"])
+
+        # Forward pass for M
+        patcher = BackPatchHook(self.model, dst_layer + 1, dst_layer, img_indices)
+        outputs = patcher.patch_and_forward(inputs, source_activation)
+        logits = outputs.logits[:, -1, :]
+        M = compute_logit_mass(logits.squeeze(0), ref_ids, comp_ids)
+
+        # Generation with patch during prefill
+        _call_count = [0]
+        layers_list = get_decoder_layers(self.model)
+        if dst_layer == 0:
+            hook_target = get_embed_tokens(self.model)
+        else:
+            hook_target = layers_list[dst_layer - 1]
+
+        def _inject_once(_module, _input, output):
+            _call_count[0] += 1
+            if _call_count[0] > 1:
+                return output
+            hs = output[0] if isinstance(output, tuple) else output
+            hs = hs.clone()
+            hs[:, img_indices, :] = source_activation.to(hs.dtype)
+            if isinstance(output, tuple):
+                return (hs,) + output[1:]
+            return hs
+
+        h = hook_target.register_forward_hook(_inject_once)
+        try:
+            with torch.no_grad():
+                output_ids = self.model.generate(
+                    **inputs, max_new_tokens=max_new_tokens, do_sample=False
+                )
+        finally:
+            h.remove()
+
+        input_len = inputs["input_ids"].shape[1]
+        text = self.processor.tokenizer.decode(
+            output_ids[0, input_len:], skip_special_tokens=True
+        )
+        return {"M": M, "generated_text": text}

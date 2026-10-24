@@ -469,17 +469,15 @@ class HarmEmergenceDiagnostic:
                 states = extract_hidden_states(self.model, inputs, [l])
                 img_hs = states[l][0, img_positions, :]  # (n_img, d)
 
-                # Trim top percentile by channel norm
+                # Zero out top percentile outlier channels by norm (preserving dimension)
                 if trim_percentile > 0:
                     norms = img_hs.norm(dim=0)
                     threshold = np.percentile(
                         norms.cpu().numpy(), 100 - trim_percentile
                     )
-                    keep_mask = norms <= threshold
-                    img_hs = img_hs[:, keep_mask]
-                    # Pad to match probe dimensions if needed
-                    # (probes were trained on full dim; trimming must be consistent)
-                    # NOTE: For production, train text probes with same trimming.
+                    outliers = norms > threshold
+                    img_hs = img_hs.clone()
+                    img_hs[:, outliers] = 0.0
 
                 rep = img_hs.mean(dim=0).cpu().numpy()
                 img_reps.append(rep)
@@ -678,13 +676,13 @@ def run_phase1(
     )
 
     results = {
-        "L_read": L_read,
-        "L_read_ci": L_read_ci,
-        "L_harm": L_harm,
-        "L_harm_ci": L_harm_ci,
-        "gap": gap,
-        "gap_ci": (gap_ci_low, gap_ci_high),
-        "gate1_pass": gate1_pass,
+        "L_read": int(L_read),
+        "L_read_ci": [int(x) for x in L_read_ci],
+        "L_harm": int(L_harm),
+        "L_harm_ci": [int(x) for x in L_harm_ci],
+        "gap": int(gap),
+        "gap_ci": (float(gap_ci_low), float(gap_ci_high)),
+        "gate1_pass": bool(gate1_pass),
         "piecewise_sensitivity": pw,
         "plots_dir": str(output_dir),
     }

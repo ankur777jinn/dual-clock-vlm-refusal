@@ -137,10 +137,14 @@ STEERING_ALPHAS: List[float] = [0.5, 1.0, 1.5, 2.0, 3.0]
 ANCHOR: Tuple[int, int] = (11, 7)
 
 # ---------------------------------------------------------------------------
-# Token lists — populated after Tuning-phase analysis
+# Token lists — defaults populated for Qwen2.5-VL, refined in Tuning phase
 # ---------------------------------------------------------------------------
-REFUSAL_TOKENS: List[str] = []   # e.g. ["I", "Sorry", "cannot", …]
-COMPLIANCE_TOKENS: List[str] = []  # e.g. ["Step", "1", "First", …]
+REFUSAL_TOKENS: List[str] = [
+    "I", "Sorry", "I'm", "As", "cannot", "can't", "unable", "sorry", "Apologies"
+]
+COMPLIANCE_TOKENS: List[str] = [
+    "Sure", "Here", "To", "Step", "1", "First", "Certainly", "Okay", "In", "Yes"
+]
 
 # ---------------------------------------------------------------------------
 # Judge configuration

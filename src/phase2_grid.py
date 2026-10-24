@@ -127,14 +127,21 @@ class GridRunner:
         jump = dst_layer - src_layer
         results: list[PatchResult] = []
 
+        from src.config import Config
         for img in images:
+            img_id = getattr(img, "image_id", getattr(img, "id", "unknown"))
+            cohort_raw = getattr(img, "cohort", "HS")
+            img_cohort = cohort_raw.name if hasattr(cohort_raw, "name") else str(cohort_raw)
+            img_image = getattr(img, "image", getattr(img, "path", None))
+            img_prompt = getattr(img, "prompt", Config.PROMPT)
+
             try:
                 # 1. Capture source representation
                 src_act = self.engine.capture_source(
                     model=self.model,
                     processor=self.processor,
-                    image=img.image,
-                    prompt=img.prompt,
+                    image=img_image,
+                    prompt=img_prompt,
                     layer=src_layer,
                     device=self.device,
                 )
@@ -143,8 +150,8 @@ class GridRunner:
                 patched_out = self.engine.run_patched(
                     model=self.model,
                     processor=self.processor,
-                    image=img.image,
-                    prompt=img.prompt,
+                    image=img_image,
+                    prompt=img_prompt,
                     source_activation=src_act,
                     dst_layer=dst_layer,
                     device=self.device,
@@ -156,15 +163,15 @@ class GridRunner:
 
             except Exception:
                 logger.exception(
-                    "Error in cell src=%d dst=%d image=%s", src_layer, dst_layer, img.image_id,
+                    "Error in cell src=%d dst=%d image=%s", src_layer, dst_layer, img_id,
                 )
                 M_value = float("nan")
                 gen_text = "<ERROR>"
 
             results.append(
                 PatchResult(
-                    image_id=img.image_id,
-                    cohort=img.cohort,
+                    image_id=img_id,
+                    cohort=img_cohort,
                     src_layer=src_layer,
                     dst_layer=dst_layer,
                     jump=jump,
@@ -198,27 +205,34 @@ class GridRunner:
         """
         results: list[PatchResult] = []
 
+        from src.config import Config
         for img in images:
+            img_id = getattr(img, "image_id", getattr(img, "id", "unknown"))
+            cohort_raw = getattr(img, "cohort", "HS")
+            img_cohort = cohort_raw.name if hasattr(cohort_raw, "name") else str(cohort_raw)
+            img_image = getattr(img, "image", getattr(img, "path", None))
+            img_prompt = getattr(img, "prompt", Config.PROMPT)
+
             try:
                 clean_out = self.engine.run_clean(
                     model=self.model,
                     processor=self.processor,
-                    image=img.image,
-                    prompt=img.prompt,
+                    image=img_image,
+                    prompt=img_prompt,
                     device=self.device,
                     max_new_tokens=self._max_new_tokens,
                 )
                 M_value = float(clean_out["M"])
                 gen_text = clean_out["generated_text"]
             except Exception:
-                logger.exception("Error in unpatched run for image=%s", img.image_id)
+                logger.exception("Error in unpatched run for image=%s", img_id)
                 M_value = float("nan")
                 gen_text = "<ERROR>"
 
             results.append(
                 PatchResult(
-                    image_id=img.image_id,
-                    cohort=img.cohort,
+                    image_id=img_id,
+                    cohort=img_cohort,
                     src_layer=None,
                     dst_layer=None,
                     jump=None,
