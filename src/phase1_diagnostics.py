@@ -150,7 +150,7 @@ class ReadingWindowDiagnostic:
             inputs = self._runner._prepare_inputs(image, prompt)
             states = extract_hidden_states(self.model, inputs, [probe_layer])
             # Decision token is the last token
-            decision_rep = states[probe_layer][0, -1, :].cpu().numpy()
+            decision_rep = states[probe_layer][0, -1, :].float().cpu().numpy()
             clean_reps.append(decision_rep)
         clean_reps = np.array(clean_reps)
         labels_arr = np.array(labels)
@@ -181,7 +181,7 @@ class ReadingWindowDiagnostic:
 
                 with AttentionKnockoutHook(self.model, l, img_mask):
                     states = extract_hidden_states(self.model, inputs, [probe_layer])
-                ko_reps.append(states[probe_layer][0, -1, :].cpu().numpy())
+                ko_reps.append(states[probe_layer][0, -1, :].float().cpu().numpy())
             ko_reps = np.array(ko_reps)
 
             # Evaluate with the same cross-fitted probes
@@ -403,7 +403,7 @@ class HarmEmergenceDiagnostic:
                 inputs = {k: v.to(self.device) for k, v in inputs.items()}
                 states = extract_hidden_states(self.model, inputs, [l])
                 # Mean-pool across all tokens
-                rep = states[l][0].mean(dim=0).cpu().numpy()
+                rep = states[l][0].mean(dim=0).float().cpu().numpy()
                 reps.append(rep)
                 labels.append(1)
 
@@ -413,7 +413,7 @@ class HarmEmergenceDiagnostic:
                 )
                 inputs = {k: v.to(self.device) for k, v in inputs.items()}
                 states = extract_hidden_states(self.model, inputs, [l])
-                rep = states[l][0].mean(dim=0).cpu().numpy()
+                rep = states[l][0].mean(dim=0).float().cpu().numpy()
                 reps.append(rep)
                 labels.append(0)
 
@@ -473,13 +473,13 @@ class HarmEmergenceDiagnostic:
                 if trim_percentile > 0:
                     norms = img_hs.norm(dim=0)
                     threshold = np.percentile(
-                        norms.cpu().numpy(), 100 - trim_percentile
+                        norms.float().cpu().numpy(), 100 - trim_percentile
                     )
                     outliers = norms > threshold
                     img_hs = img_hs.clone()
                     img_hs[:, outliers] = 0.0
 
-                rep = img_hs.mean(dim=0).cpu().numpy()
+                rep = img_hs.mean(dim=0).float().cpu().numpy()
                 img_reps.append(rep)
 
             X_img = np.array(img_reps)
@@ -505,7 +505,7 @@ class HarmEmergenceDiagnostic:
                         inputs["input_ids"], self._image_token_id
                     )
                     states = extract_hidden_states(self.model, inputs, [l])
-                    rep = states[l][0, img_positions, :].mean(dim=0).cpu().numpy()
+                    rep = states[l][0, img_positions, :].mean(dim=0).float().cpu().numpy()
                     img_reps_full.append(rep)
                 X_img = np.array(img_reps_full)
                 scores = probe.predict_proba(X_img)[:, 1]
