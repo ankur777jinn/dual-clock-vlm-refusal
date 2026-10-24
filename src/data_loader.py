@@ -302,6 +302,8 @@ class TextPartitioner:
 
         self._harmful_strings: List[str] = self._load(self.advbench_path)
         self._benign_strings: List[str] = self._load(self.alpaca_path)
+        self._advbench = self._harmful_strings
+        self._alpaca = self._benign_strings
 
     @staticmethod
     def _load(path: Path) -> List[str]:

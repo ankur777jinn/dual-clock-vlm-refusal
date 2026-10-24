@@ -617,8 +617,10 @@ def run_phase1(
     probe_texts, _ = text_partitioner.cluster_and_split()
 
     # Separate AdvBench (harmful) and Alpaca (benign) from probe partition
-    harmful_texts = [t for t in probe_texts if t in text_partitioner._advbench]
-    benign_texts = [t for t in probe_texts if t in text_partitioner._alpaca]
+    harmful_candidates = set(getattr(text_partitioner, "_harmful_strings", getattr(text_partitioner, "_advbench", [])))
+    benign_candidates = set(getattr(text_partitioner, "_benign_strings", getattr(text_partitioner, "_alpaca", [])))
+    harmful_texts = [t for t in probe_texts if t in harmful_candidates]
+    benign_texts = [t for t in probe_texts if t in benign_candidates]
 
     # --- 1A: Reading Window ---
     logger.info("=" * 60)
