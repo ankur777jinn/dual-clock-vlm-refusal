@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""
+Phase 2 Grid Execution Script.
+
+Runs the 55-cell factorial back-patching grid + unpatched reference on the
+specified split (Validation for pilot sweeps, Test for confirmatory).
+
+Usage:
+    python scripts/run_phase2.py --data-dir /path/to/data --output-dir /path/to/output \
+        --split validation --L-read 12 --L-harm 18
+"""
+
+import argparse
+import logging
+import json
+from pathlib import Path
+
+import torch
+
+from src.config import Config, build_grid, count_quadrants
+from src.data_loader import DatasetManager, DataSplit
+from src.patching_engine import PrefillRunner
+from src.phase2_grid import GridRunner, JudgeEvaluator
+from src.utils import set_seed
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Phase 2 Factorial Grid")
+    parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--split", type=str, choices=["validation", "test"], required=True)
+    parser.add_argument("--L-read", type=int, required=True, help="L_read from Phase 1")
+    parser.add_argument("--L-harm", type=int, required=True, help="L_harm from Phase 1")
+    parser.add_argument("--run-nonsafety", action="store_true", help="Also run non-safety grid")
+    parser.add_argument("--judge", action="store_true", help="Run judge evaluation on completions")
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    set_seed(args.seed)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    grid = build_grid()
+    quadrants = count_quadrants(args.L_read, args.L_harm, grid)
+    logger.info("Grid: %d cells. Quadrants at L_read=%d, L_harm=%d:", len(grid), args.L_read, args.L_harm)
+    for name, count in quadrants.items():
+        logger.info("  %s: %d cells", name, count)
+
+    split = DataSplit.VALIDATION if args.split == "validation" else DataSplit.TEST
+
+    logger.info("Loading model: %s", Config.MODEL_ID)
+    from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        Config.MODEL_ID,
+        torch_dtype=Config.DTYPE,
+        device_map=args.device,
+    )
+    model.eval()
+    processor = AutoProcessor.from_pretrained(Config.MODEL_ID)
+
+    dataset_manager = DatasetManager(args.data_dir)
+    prefill_runner = PrefillRunner(model, processor, torch.device(args.device))
+    grid_runner = GridRunner(model, processor, prefill_runner, Config, torch.device(args.device))
+
+    # Get images for the split
+    images = dataset_manager.get_split(split)
+    logger.info("Running grid on %d images (%s split)...", len(images), args.split)
+
+    results_df = grid_runner.run_full_grid(images, grid, args.output_dir)
+    results_df.to_parquet(args.output_dir / f"grid_results_{args.split}.parquet")
+    logger.info("Grid results saved: %d rows", len(results_df))
+
+    if args.run_nonsafety:
+        from src.data_loader import ImageCohort
+        control_images = (
+            dataset_manager.get_split(split, ImageCohort.CONTROL_PLUMBING)
+            + dataset_manager.get_split(split, ImageCohort.CONTROL_GARDENING)
+        )
+        logger.info("Running non-safety grid on %d control images...", len(control_images))
+        nonsafety_df = grid_runner.run_nonsafety_grid(control_images, grid, {}, args.output_dir)
+        nonsafety_df.to_parquet(args.output_dir / f"nonsafety_grid_{args.split}.parquet")
+
+    if args.judge:
+        logger.info("Running judge evaluation...")
+        judge = JudgeEvaluator(Config.PRIMARY_JUDGE, Config.BACKUP_JUDGE)
+        # Judge only generated completions (not just logit mass)
+        logger.info("Judge evaluation requires generated completions — run with generation enabled.")
+
+    logger.info("Phase 2 grid execution complete.")
+
+
+if __name__ == "__main__":
+    main()
