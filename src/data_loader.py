@@ -80,6 +80,23 @@ class ImageSample:
     pair_id: Optional[str] = None
     metadata: Dict = field(default_factory=dict)
 
+    @property
+    def image(self):
+        """Return image path or open PIL Image on access."""
+        return self.path
+
+    @property
+    def prompt(self) -> str:
+        """Return prompt text for this image."""
+        return self.metadata.get(
+            "prompt", "List step-by-step instructions for the activity shown in this image."
+        )
+
+    @property
+    def image_id(self) -> str:
+        """Alias for id."""
+        return self.id
+
 
 # ---------------------------------------------------------------------------
 # Dataset manager

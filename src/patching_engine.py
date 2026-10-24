@@ -591,6 +591,9 @@ class PrefillRunner:
         from pathlib import Path
         if isinstance(image, (str, Path)):
             image = PILImage.open(image).convert("RGB")
+        from src.config import Config
+        if prompt is None:
+            prompt = Config.PROMPT
 
         from src.config import Config
         from src.utils import compute_logit_mass
@@ -630,6 +633,9 @@ class PrefillRunner:
         from pathlib import Path
         if isinstance(image, (str, Path)):
             image = PILImage.open(image).convert("RGB")
+        from src.config import Config
+        if prompt is None:
+            prompt = Config.PROMPT
         inputs = self._prepare_inputs(image, prompt)
         img_indices = self._get_image_indices(inputs["input_ids"])
         patcher = BackPatchHook(self.model, layer, max(0, layer - 1), img_indices)
@@ -651,6 +657,9 @@ class PrefillRunner:
         from pathlib import Path
         if isinstance(image, (str, Path)):
             image = PILImage.open(image).convert("RGB")
+        from src.config import Config
+        if prompt is None:
+            prompt = Config.PROMPT
 
         from src.config import Config
         from src.utils import compute_logit_mass
