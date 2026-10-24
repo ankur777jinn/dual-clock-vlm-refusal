@@ -196,13 +196,24 @@ def bootstrap_ci(
     tuple[float, float]
         ``(lower, upper)`` bounds of the CI.
     """
+    import pandas as pd
     rng = np.random.RandomState(rng_seed)
-    arr = np.asarray(data, dtype=np.float64)
-    n = len(arr)
-
+    n = len(data)
     boot_stats = np.empty(n_boot, dtype=np.float64)
+
+    is_df = isinstance(data, pd.DataFrame)
+    is_series = isinstance(data, pd.Series)
+    is_list = isinstance(data, list)
+
     for i in range(n_boot):
-        sample = rng.choice(arr, size=n, replace=True)
+        idx = rng.choice(n, size=n, replace=True)
+        if is_df or is_series:
+            sample = data.iloc[idx]
+        elif is_list:
+            sample = [data[j] for j in idx]
+        else:
+            arr = np.asarray(data)
+            sample = arr[idx]
         boot_stats[i] = stat_fn(sample)
 
     lower = float(np.percentile(boot_stats, 100 * alpha / 2))

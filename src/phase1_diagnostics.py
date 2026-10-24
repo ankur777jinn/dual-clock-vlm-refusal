@@ -242,9 +242,14 @@ class ReadingWindowDiagnostic:
 
         L_read = l_star - 1
 
-        # Bootstrap CI
-        def _boot_L_read(data):
-            grouped = data.groupby("layer")[readout_col].mean().sort_index()
+        # Bootstrap CI over unique images
+        unique_images = knockout_curve["image_id"].unique()
+
+        def _boot_L_read(sample_img_ids):
+            sub = knockout_curve[knockout_curve["image_id"].isin(sample_img_ids)]
+            grouped = sub.groupby("layer")[readout_col].mean().sort_index()
+            if len(grouped) == 0:
+                return L_read
             d1 = grouped.iloc[0]
             thresh = threshold_frac * d1
             for lay, d in grouped.items():
@@ -252,7 +257,7 @@ class ReadingWindowDiagnostic:
                     return int(lay) - 1
             return int(grouped.index[-1]) - 1
 
-        ci = bootstrap_ci(knockout_curve, _boot_L_read, n_boot=2000)
+        ci = bootstrap_ci(unique_images, _boot_L_read, n_boot=2000)
 
         logger.info("L_read = %d (95%% CI: %s), l* = %d", L_read, ci, l_star)
         return L_read, ci
@@ -545,15 +550,20 @@ class HarmEmergenceDiagnostic:
             logger.warning("Transfer AUROC never reaches %.2f; using last layer.", threshold)
             L_harm = int(auroc_by_layer.index[-1])
 
-        # Bootstrap CI over images
-        def _boot_L_harm(data):
-            by_layer = data.groupby("layer")["auroc"].first().sort_index()
+        # Bootstrap CI over unique images
+        unique_images = transfer_curve["image_id"].unique()
+
+        def _boot_L_harm(sample_img_ids):
+            sub = transfer_curve[transfer_curve["image_id"].isin(sample_img_ids)]
+            by_layer = sub.groupby("layer")["auroc"].first().sort_index()
+            if len(by_layer) == 0:
+                return L_harm
             for lay, a in by_layer.items():
                 if a >= threshold:
                     return int(lay)
             return int(by_layer.index[-1])
 
-        ci = bootstrap_ci(transfer_curve, _boot_L_harm, n_boot=2000)
+        ci = bootstrap_ci(unique_images, _boot_L_harm, n_boot=2000)
 
         logger.info("L_harm = %d (95%% CI: %s)", L_harm, ci)
         return L_harm, ci
@@ -627,17 +637,19 @@ def run_phase1(
 
     rw_diag = ReadingWindowDiagnostic(model, processor, device)
 
-    # Primary: M-based on typographic images (TODO: load typographic images)
-    # For now, use natural images with probe-based readout
-    logger.info("Running probe-based knockout curve on natural images...")
-    # Load actual images from ImageSample paths
     from PIL import Image
     pil_images = [Image.open(s.path).convert("RGB") for s in all_images]
 
-    ko_curve = rw_diag.measure_knockout_curve_probe(
-        pil_images, all_labels, Config.PROMPT
-    )
-    ko_curve.to_parquet(output_dir / "knockout_curve_probe.parquet")
+    ko_curve_path = output_dir / "knockout_curve_probe.parquet"
+    if ko_curve_path.exists():
+        logger.info("Found pre-computed knockout curve at %s; loading cached results...", ko_curve_path)
+        ko_curve = pd.read_parquet(ko_curve_path)
+    else:
+        logger.info("Running probe-based knockout curve on natural images...")
+        ko_curve = rw_diag.measure_knockout_curve_probe(
+            pil_images, all_labels, Config.PROMPT
+        )
+        ko_curve.to_parquet(ko_curve_path)
 
     L_read, L_read_ci = rw_diag.find_L_read(ko_curve, readout_col="delta_d_prime")
 
@@ -655,12 +667,16 @@ def run_phase1(
     layers = list(range(0, Config.NUM_LAYERS, 2)) + [Config.NUM_LAYERS - 1]
     layers = sorted(set(layers))
 
-    probes = he_diag.train_text_probes(harmful_texts, benign_texts, layers)
-
-    transfer_curve = he_diag.evaluate_cross_modal_transfer(
-        probes, pil_images, all_labels, Config.PROMPT, layers
-    )
-    transfer_curve.to_parquet(output_dir / "transfer_curve.parquet")
+    transfer_curve_path = output_dir / "transfer_curve.parquet"
+    if transfer_curve_path.exists():
+        logger.info("Found pre-computed transfer curve at %s; loading cached results...", transfer_curve_path)
+        transfer_curve = pd.read_parquet(transfer_curve_path)
+    else:
+        probes = he_diag.train_text_probes(harmful_texts, benign_texts, layers)
+        transfer_curve = he_diag.evaluate_cross_modal_transfer(
+            probes, pil_images, all_labels, Config.PROMPT, layers
+        )
+        transfer_curve.to_parquet(transfer_curve_path)
 
     L_harm, L_harm_ci = he_diag.find_L_harm(transfer_curve)
 
