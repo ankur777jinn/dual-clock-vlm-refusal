@@ -219,31 +219,39 @@ class AttentionKnockoutHook:
             def _pre_hook(module, args, kwargs):
                 attn_mask_key = "attention_mask"
                 mask = None
-                is_kwarg = False
+                is_kwarg = True
                 if attn_mask_key in kwargs and kwargs[attn_mask_key] is not None:
                     mask = kwargs[attn_mask_key].clone()
-                    is_kwarg = True
                 elif len(args) > 1 and args[1] is not None:
                     mask = args[1].clone()
                     is_kwarg = False
 
-                if mask is not None:
-                    min_val = torch.finfo(mask.dtype).min
-                    # Knockout: text queries → image keys
-                    if mask.dim() == 4:
-                        for tpos in txt_positions:
-                            mask[:, :, tpos, img_positions] = min_val
-                    elif mask.dim() == 2:
-                        b, s = mask.shape
-                        expanded = mask[:, None, None, :].expand(b, 1, s, s).clone()
-                        for tpos in txt_positions:
-                            expanded[:, :, tpos, img_positions] = min_val
-                        mask = expanded
+                hs = args[0] if len(args) > 0 else kwargs.get("hidden_states")
+                if hs is None:
+                    return args, kwargs
+                b, s = hs.shape[0], hs.shape[1]
+                min_val = torch.finfo(hs.dtype).min
 
-                    if is_kwarg:
-                        kwargs[attn_mask_key] = mask
-                    else:
-                        args = (args[0], mask) + args[2:]
+                if mask is None:
+                    # Construct standard 4D causal mask for SDPA
+                    mask = torch.triu(
+                        torch.full((s, s), min_val, dtype=hs.dtype, device=hs.device),
+                        diagonal=1,
+                    ).unsqueeze(0).unsqueeze(0).expand(b, 1, s, s).clone()
+                    is_kwarg = True
+                else:
+                    mask = mask.clone()
+                    if mask.dim() == 2:
+                        mask = mask[:, None, None, :].expand(b, 1, s, s).clone()
+
+                # Pre-softmax knockout: text queries → image keys
+                for tpos in txt_positions:
+                    mask[:, :, tpos, img_positions] = min_val
+
+                if is_kwarg:
+                    kwargs[attn_mask_key] = mask
+                else:
+                    args = (args[0], mask) + args[2:]
                 return args, kwargs
             return _pre_hook
 
