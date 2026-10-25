@@ -15,6 +15,7 @@ import logging
 import json
 from pathlib import Path
 
+import pandas as pd
 import torch
 
 from src.config import Config, build_grid, count_quadrants
@@ -73,30 +74,56 @@ def main():
 
     # Get images for the split
     images = dataset_manager.get_split(split)
-    logger.info("Running grid on %d images (%s split)...", len(images), args.split)
 
-    results_df = grid_runner.run_full_grid(images, grid, args.output_dir)
-    results_df.to_parquet(args.output_dir / f"grid_results_{args.split}.parquet")
-    logger.info("Grid results saved: %d rows", len(results_df))
+    grid_parquet = args.output_dir / f"grid_results_{args.split}.parquet"
+    backup_parquet = args.output_dir / "grid_results.parquet"
+
+    if grid_parquet.exists() and grid_parquet.stat().st_size > 0:
+        logger.info("Found existing grid results at %s (%d bytes). Loading to avoid rerun...",
+                    grid_parquet, grid_parquet.stat().st_size)
+        results_df = pd.read_parquet(grid_parquet)
+        logger.info("Loaded grid results: %d rows", len(results_df))
+    elif backup_parquet.exists() and backup_parquet.stat().st_size > 0:
+        logger.info("Found existing full grid at %s (%d bytes). Copying to %s...",
+                    backup_parquet, backup_parquet.stat().st_size, grid_parquet)
+        results_df = pd.read_parquet(backup_parquet)
+        results_df.to_parquet(grid_parquet)
+        logger.info("Saved grid results: %d rows", len(results_df))
+    else:
+        logger.info("Running grid on %d images (%s split)...", len(images), args.split)
+        results_df = grid_runner.run_full_grid(images, grid, args.output_dir)
+        results_df.to_parquet(grid_parquet)
+        logger.info("Grid results saved: %d rows", len(results_df))
 
     if args.run_nonsafety:
-        from src.data_loader import ImageCohort
-        control_images = (
-            dataset_manager.get_split(split, ImageCohort.CONTROL_PLUMBING)
-            + dataset_manager.get_split(split, ImageCohort.CONTROL_GARDENING)
-        )
-        if not control_images:
-            # Fall back to test split control images if current split does not contain them
-            control_images = (
-                dataset_manager.get_split(DataSplit.TEST, ImageCohort.CONTROL_PLUMBING)
-                + dataset_manager.get_split(DataSplit.TEST, ImageCohort.CONTROL_GARDENING)
-            )
-        if control_images:
-            logger.info("Running non-safety grid on %d control images...", len(control_images))
-            nonsafety_df = grid_runner.run_nonsafety_grid(control_images, grid, {}, args.output_dir)
-            nonsafety_df.to_parquet(args.output_dir / f"nonsafety_grid_{args.split}.parquet")
+        nonsafety_parquet = args.output_dir / f"nonsafety_grid_{args.split}.parquet"
+        backup_nonsafety = args.output_dir / "nonsafety_grid_results.parquet"
+
+        if nonsafety_parquet.exists() and nonsafety_parquet.stat().st_size > 0:
+            logger.info("Found existing non-safety grid at %s. Skipping rerun...", nonsafety_parquet)
+            nonsafety_df = pd.read_parquet(nonsafety_parquet)
+        elif backup_nonsafety.exists() and backup_nonsafety.stat().st_size > 0:
+            logger.info("Found existing non-safety grid at %s. Copying to %s...", backup_nonsafety, nonsafety_parquet)
+            nonsafety_df = pd.read_parquet(backup_nonsafety)
+            nonsafety_df.to_parquet(nonsafety_parquet)
         else:
-            logger.warning("No non-safety control images found; skipping non-safety grid.")
+            from src.data_loader import ImageCohort
+            control_images = (
+                dataset_manager.get_split(split, ImageCohort.CONTROL_PLUMBING)
+                + dataset_manager.get_split(split, ImageCohort.CONTROL_GARDENING)
+            )
+            if not control_images:
+                # Fall back to test split control images if current split does not contain them
+                control_images = (
+                    dataset_manager.get_split(DataSplit.TEST, ImageCohort.CONTROL_PLUMBING)
+                    + dataset_manager.get_split(DataSplit.TEST, ImageCohort.CONTROL_GARDENING)
+                )
+            if control_images:
+                logger.info("Running non-safety grid on %d control images...", len(control_images))
+                nonsafety_df = grid_runner.run_nonsafety_grid(control_images, grid, {}, args.output_dir)
+                nonsafety_df.to_parquet(nonsafety_parquet)
+            else:
+                logger.warning("No non-safety control images found; skipping non-safety grid.")
 
     if args.judge:
         logger.info("Running judge evaluation on generated completions...")

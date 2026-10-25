@@ -346,16 +346,27 @@ class GridRunner:
         output_dir.mkdir(parents=True, exist_ok=True)
         rows: list[dict] = []
 
+        from src.config import Config
         for idx, (src, dst) in enumerate(grid, start=1):
             logger.info("Non-safety cell %d / %d  (src=%d → dst=%d)", idx, len(grid), src, dst)
 
             for img in control_images:
+                cohort_val = getattr(img, "cohort", "control")
+                cohort_str = (
+                    cohort_val.value
+                    if hasattr(cohort_val, "value")
+                    else (cohort_val.name if hasattr(cohort_val, "name") else str(cohort_val))
+                )
+                img_id = getattr(img, "image_id", getattr(img, "id", "unknown"))
+                img_image = getattr(img, "image", getattr(img, "path", None))
+                img_prompt = getattr(img, "prompt", Config.PROMPT)
+
                 row: dict = {
-                    "image_id": img.image_id,
-                    "cohort": img.cohort,
-                    "src": src,
-                    "dst": dst,
-                    "jump": dst - src,
+                    "image_id": str(img_id),
+                    "cohort": str(cohort_str),
+                    "src": int(src),
+                    "dst": int(dst),
+                    "jump": int(src - dst),
                     "patched": True,
                 }
 
@@ -363,8 +374,8 @@ class GridRunner:
                     src_act = self.engine.capture_source(
                         model=self.model,
                         processor=self.processor,
-                        image=img.image,
-                        prompt=img.prompt,
+                        image=img_image,
+                        prompt=img_prompt,
                         layer=src,
                         device=self.device,
                     )
@@ -373,8 +384,8 @@ class GridRunner:
                         score = probe_fn(
                             self.model,
                             self.processor,
-                            img.image,
-                            img.prompt,
+                            img_image,
+                            img_prompt,
                             src_act,
                             self.device,
                         )
@@ -383,7 +394,7 @@ class GridRunner:
                 except Exception:
                     logger.exception(
                         "Non-safety probe error src=%d dst=%d image=%s",
-                        src, dst, img.image_id,
+                        src, dst, img_id,
                     )
                     for probe_name in probes:
                         row[probe_name] = float("nan")
@@ -391,6 +402,8 @@ class GridRunner:
                 rows.append(row)
 
         df = pd.DataFrame(rows)
+        for col in df.select_dtypes(include=["object"]).columns:
+            df[col] = df[col].astype(str)
         df.to_parquet(output_dir / "nonsafety_grid_results.parquet", index=False)
         return df
 
