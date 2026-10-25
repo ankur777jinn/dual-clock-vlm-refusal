@@ -458,7 +458,14 @@ class PrefillRunner:
 
     def _prepare_inputs(self, image, prompt: str) -> dict:
         """Tokenize image + prompt into model-ready inputs."""
+        from pathlib import Path
+        from PIL import Image as PILImage
         from qwen_vl_utils import process_vision_info
+
+        if isinstance(image, (str, Path)):
+            image = PILImage.open(str(image)).convert("RGB")
+        elif hasattr(image, "__fspath__"):
+            image = PILImage.open(str(image.__fspath__())).convert("RGB")
 
         messages = [
             {

@@ -580,11 +580,15 @@ class ControlRunner:
             pass_fail: str, per_image_deltas: list[float]}``
         """
         deltas: list[float] = []
+        from pathlib import Path
+        from PIL import Image as PILImage
         from src.patching_engine import BackPatchHook
         from src.config import Config
 
         for img in images:
             img_image = getattr(img, "image", getattr(img, "path", None))
+            if isinstance(img_image, (str, Path)):
+                img_image = PILImage.open(str(img_image)).convert("RGB")
             img_prompt = getattr(img, "prompt", Config.PROMPT)
             inputs = self.engine._prepare_inputs(img_image, img_prompt)
             img_indices = self.engine._get_image_indices(inputs["input_ids"])
