@@ -93,6 +93,22 @@ def main():
     # C5: Typographic calibration
     logger.info("Running C5 Typographic calibration...")
     typo_harmful = dataset_manager.get_split(DataSplit.TEST, ImageCohort.TYPO_HARMFUL)
+    if not typo_harmful:
+        from src.data_loader import render_typographic, ImageSample
+        advbench_file = args.data_dir / "advbench_520.txt"
+        if advbench_file.exists():
+            with open(advbench_file, "r", encoding="utf-8") as f:
+                adv_lines = [l.strip() for l in f if l.strip()]
+            for idx, text in enumerate(adv_lines[:10]):
+                img = render_typographic(text)
+                typo_harmful.append(ImageSample(
+                    id=f"typo_{idx}",
+                    path="",
+                    cohort=ImageCohort.TYPO_HARMFUL,
+                    split=DataSplit.TEST,
+                    image=img,
+                    prompt=Config.PROMPT,
+                ))
     c5_result = control_runner.run_c5_typographic(typo_harmful, args.src_layer, args.dst_layer)
     logger.info("C5 result: %s", c5_result)
 

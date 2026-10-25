@@ -580,31 +580,18 @@ class ControlRunner:
             pass_fail: str, per_image_deltas: list[float]}``
         """
         deltas: list[float] = []
+        from src.patching_engine import BackPatchHook
+        from src.config import Config
 
         for img in images:
-            # Clean forward
-            clean_out = self.engine.run_clean(
-                model=self.model, processor=self.processor,
-                image=img.image, prompt=img.prompt,
-                device=self.device, max_new_tokens=self._max_new_tokens,
+            img_image = getattr(img, "image", getattr(img, "path", None))
+            img_prompt = getattr(img, "prompt", Config.PROMPT)
+            inputs = self.engine._prepare_inputs(img_image, img_prompt)
+            img_indices = self.engine._get_image_indices(inputs["input_ids"])
+            _passed_id, max_d = BackPatchHook.verify_identity(
+                self.model, inputs, dst_layer, img_indices
             )
-            M_clean = float(clean_out["M"])
-
-            # Self-injection
-            act = self.engine.capture_source(
-                model=self.model, processor=self.processor,
-                image=img.image, prompt=img.prompt,
-                layer=dst_layer, device=self.device,
-            )
-            patched_out = self.engine.run_patched(
-                model=self.model, processor=self.processor,
-                image=img.image, prompt=img.prompt,
-                source_activation=act, dst_layer=dst_layer,
-                device=self.device, max_new_tokens=self._max_new_tokens,
-            )
-            M_patched = float(patched_out["M"])
-
-            deltas.append(abs(M_clean - M_patched))
+            deltas.append(max_d)
 
         max_d = float(np.max(deltas))
         mean_d = float(np.mean(deltas))
