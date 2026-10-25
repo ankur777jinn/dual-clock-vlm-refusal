@@ -85,6 +85,7 @@ class GridRunner:
         self.model = model
         self.processor = processor
         self.engine = patching_engine
+        self.device = device
         if isinstance(config, dict):
             self.config = config
         elif hasattr(config, "__dict__"):

@@ -85,9 +85,18 @@ def main():
             dataset_manager.get_split(split, ImageCohort.CONTROL_PLUMBING)
             + dataset_manager.get_split(split, ImageCohort.CONTROL_GARDENING)
         )
-        logger.info("Running non-safety grid on %d control images...", len(control_images))
-        nonsafety_df = grid_runner.run_nonsafety_grid(control_images, grid, {}, args.output_dir)
-        nonsafety_df.to_parquet(args.output_dir / f"nonsafety_grid_{args.split}.parquet")
+        if not control_images:
+            # Fall back to test split control images if current split does not contain them
+            control_images = (
+                dataset_manager.get_split(DataSplit.TEST, ImageCohort.CONTROL_PLUMBING)
+                + dataset_manager.get_split(DataSplit.TEST, ImageCohort.CONTROL_GARDENING)
+            )
+        if control_images:
+            logger.info("Running non-safety grid on %d control images...", len(control_images))
+            nonsafety_df = grid_runner.run_nonsafety_grid(control_images, grid, {}, args.output_dir)
+            nonsafety_df.to_parquet(args.output_dir / f"nonsafety_grid_{args.split}.parquet")
+        else:
+            logger.warning("No non-safety control images found; skipping non-safety grid.")
 
     if args.judge:
         logger.info("Running judge evaluation on generated completions...")
