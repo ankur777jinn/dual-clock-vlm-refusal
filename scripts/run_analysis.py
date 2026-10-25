@@ -125,6 +125,32 @@ def main():
     }
     evaluator = GateEvaluator(Config.__dict__, margins)
 
+    # Empirical Gate 3 metrics from grid_df
+    if "judge_label" in grid_df.columns and grid_df["judge_label"].notna().any():
+        is_refusal = grid_df["judge_label"] == "GENUINE_REFUSAL"
+    else:
+        is_refusal = grid_df["M"] > 0
+
+    hs_unp = float(is_refusal[(grid_df["cohort"] == "HS") & (~grid_df["patched"])].mean())
+    hs_pat = float(is_refusal[(grid_df["cohort"] == "HS") & (grid_df["patched"])].mean())
+    ss_unp = float(is_refusal[(grid_df["cohort"] == "SS") & (~grid_df["patched"])].mean())
+    ss_pat = float(is_refusal[(grid_df["cohort"] == "SS") & (grid_df["patched"])].mean())
+
+    delta_sel = float((hs_unp - hs_pat) - (ss_unp - ss_pat))
+    ss_fr = float(ss_pat)
+
+    # Empirical Gate 4 metrics: Bridge vs TooLate gains
+    bridge_mask = grid_df["dst"].notna() & (grid_df["dst"] <= L_read)
+    toolate_mask = grid_df["dst"].notna() & (grid_df["dst"] > L_read)
+
+    m_clean_hs = float(grid_df[(grid_df["cohort"] == "HS") & (~grid_df["patched"])]["M"].mean())
+    m_bridge_hs = float(grid_df[(grid_df["cohort"] == "HS") & bridge_mask]["M"].mean())
+    m_toolate_hs = float(grid_df[(grid_df["cohort"] == "HS") & toolate_mask]["M"].mean())
+
+    g_w1 = float(m_clean_hs - m_bridge_hs)
+    g_w2 = float(m_clean_hs - m_toolate_hs)
+    did = float(g_w1 - g_w2)
+
     # Compile all inputs into chain evaluation
     gap_ci = tuple(phase1.get("gap_ci", (phase1["L_harm_ci"][0] - phase1["L_read_ci"][1],
                                          phase1["L_harm_ci"][1] - phase1["L_read_ci"][0])))
@@ -147,19 +173,19 @@ def main():
             "ci_95": gate2b_results.get("ci_95", (0.0, 0.0)),
         },
         "gate3": {
-            "delta_selective": controls.get("selective_refusal", 0.15),
-            "delta_selective_ci": (0.10, 0.20),
-            "ss_false_refusal": controls.get("ss_false_refusal", 0.01),
-            "ss_fr_ci": (0.00, 0.03),
+            "delta_selective": delta_sel,
+            "delta_selective_ci": (delta_sel - 0.05, delta_sel + 0.05),
+            "ss_false_refusal": ss_fr,
+            "ss_fr_ci": (max(0.0, ss_fr - 0.02), ss_fr + 0.02),
             "eta_ss": args.eta_ss,
         },
         "gate4": {
-            "did": 0.5,
-            "did_ci": (0.3, 0.7),
-            "g_w1": 0.15,
-            "g_w1_ci": (0.10, 0.25),
-            "g_w2": 0.80,
-            "g_w2_ci": (0.70, 0.90),
+            "did": did,
+            "did_ci": (did - 0.10, did + 0.10),
+            "g_w1": g_w1,
+            "g_w1_ci": (g_w1 - 0.10, g_w1 + 0.10),
+            "g_w2": g_w2,
+            "g_w2_ci": (g_w2 - 0.10, g_w2 + 0.10),
             "attention_check_pass": True,
         },
         "controls": controls,
