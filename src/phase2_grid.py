@@ -85,12 +85,16 @@ class GridRunner:
         self.model = model
         self.processor = processor
         self.engine = patching_engine
-        self.config = config
-        self.device = device
+        if isinstance(config, dict):
+            self.config = config
+        elif hasattr(config, "__dict__"):
+            self.config = config.__dict__
+        else:
+            self.config = {}
 
         # Generation defaults
-        self._gen_kwargs = config.get("generation", {})
-        self._max_new_tokens = self._gen_kwargs.get("max_new_tokens", 256)
+        self._gen_kwargs = self.config.get("generation", {})
+        self._max_new_tokens = getattr(config, "MAX_NEW_TOKENS", self._gen_kwargs.get("max_new_tokens", 48))
 
     # -----------------------------------------------------------------
     # Single cell
@@ -124,7 +128,7 @@ class GridRunner:
         list[PatchResult]
             One result per image, with ``patched=True``.
         """
-        jump = dst_layer - src_layer
+        jump = src_layer - dst_layer
         results: list[PatchResult] = []
 
         from src.config import Config

@@ -616,6 +616,7 @@ class ControlRunner:
             "max_delta_z": max_d,
             "mean_delta_z": mean_d,
             "pass_fail": "PASS" if passed else "FAIL",
+            "passed": bool(passed),
             "per_image_deltas": deltas,
         }
 

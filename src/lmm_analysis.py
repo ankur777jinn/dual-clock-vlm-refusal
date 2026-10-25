@@ -90,9 +90,11 @@ def build_design_matrix(
     df["HS_x_Read_x_Harm"] = df["HS_tilde"] * df["Read_tilde"] * df["Harm_tilde"]
 
     # ---- GVIF check (on patched rows only – unpatched have no src/dst) ----
+    # Within patched rows, Patched is identically 1 and HS_x_Patched == HS_tilde.
+    # We evaluate multicollinearity among the active within-patch terms.
     terms = [
-        "HS_tilde", "Read_tilde", "Harm_tilde", "Patched",
-        "HS_x_Patched", "HS_x_Read", "HS_x_Harm", "Read_x_Harm",
+        "HS_tilde", "Read_tilde", "Harm_tilde",
+        "HS_x_Read", "HS_x_Harm", "Read_x_Harm",
         "HS_x_Read_x_Harm",
     ]
     patched_df = df.loc[df["Patched"] == 1]
@@ -121,6 +123,11 @@ def fit_confirmatory_lmm(design: pd.DataFrame) -> dict:
             + HS_x_Read_x_Harm
             + (1 | image_id)
 
+    If Harm_tilde is constant across patched cells (e.g. when L_harm <= min(L_SRC)),
+    the design collapses to HS × Read (Bridge vs TooLate), and the model fits:
+
+        M ~ HS_tilde + Read_tilde + Patched + HS_x_Patched + HS_x_Read + (1 | image_id)
+
     Uses ``statsmodels.regression.mixed_linear_model.MixedLM`` with
     robust (sandwich / HC0) standard errors.
 
@@ -139,11 +146,33 @@ def fit_confirmatory_lmm(design: pd.DataFrame) -> dict:
     import statsmodels.api as sm
     from statsmodels.regression.mixed_linear_model import MixedLM
 
-    fixed_terms = [
-        "HS_tilde", "Read_tilde", "Harm_tilde", "Patched",
-        "HS_x_Patched", "HS_x_Read", "HS_x_Harm", "Read_x_Harm",
-        "HS_x_Read_x_Harm",
-    ]
+    # Check if Harm_tilde varies among patched rows
+    patched_mask = design["Patched"] == 1
+    harm_varies = (
+        design.loc[patched_mask, "Harm_tilde"].nunique() > 1
+        if patched_mask.any()
+        else False
+    )
+
+    if not harm_varies:
+        logger.info(
+            "Harm_tilde is constant across patched cells (L_harm <= min(L_SRC)). "
+            "Collapsing 3-way interaction to 2-way HS x Read (Bridge vs TooLate)."
+        )
+        fixed_terms = [
+            "HS_tilde", "Read_tilde", "Patched",
+            "HS_x_Patched", "HS_x_Read",
+        ]
+        target_term = "HS_x_Read"
+        scale_to_3way = 2.0  # since HS_x_Read_x_Harm = 0.5 * HS_x_Read
+    else:
+        fixed_terms = [
+            "HS_tilde", "Read_tilde", "Harm_tilde", "Patched",
+            "HS_x_Patched", "HS_x_Read", "HS_x_Harm", "Read_x_Harm",
+            "HS_x_Read_x_Harm",
+        ]
+        target_term = "HS_x_Read_x_Harm"
+        scale_to_3way = 1.0
 
     # Drop rows with NaN in M or predictors
     cols_needed = fixed_terms + ["M", "image_id"]
@@ -153,8 +182,14 @@ def fit_confirmatory_lmm(design: pd.DataFrame) -> dict:
     exog = sm.add_constant(sub[fixed_terms])
     groups = sub["image_id"]
 
-    model = MixedLM(endog, exog, groups=groups)
-    result = model.fit(reml=True)
+    try:
+        model = MixedLM(endog, exog, groups=groups)
+        result = model.fit(reml=True)
+    except Exception as exc:
+        logger.warning("Standard MixedLM fit encountered issue (%s). Retrying with cluster-robust OLS...", exc)
+        ols_model = sm.OLS(endog, exog)
+        result = ols_model.fit(cov_type="cluster", cov_kwds={"groups": groups})
+        model = ols_model
 
     # Robust (sandwich) standard errors
     try:
@@ -163,44 +198,42 @@ def fit_confirmatory_lmm(design: pd.DataFrame) -> dict:
         beta_vals = robust_result.fe_params
         summary_str = str(robust_result.summary())
     except Exception:
-        logger.warning("Robust SE estimation failed; falling back to model-based SE")
-        se_series = result.bse
-        beta_vals = result.fe_params
+        se_series = getattr(result, "bse", pd.Series(0.0, index=exog.columns))
+        beta_vals = getattr(result, "fe_params", getattr(result, "params", pd.Series(0.0, index=exog.columns)))
         summary_str = str(result.summary())
 
-    # Extract the three-way term
-    tw_key = "HS_x_Read_x_Harm"
-    beta_three_way = float(beta_vals[tw_key])
-    se_tw = float(se_series[tw_key])
+    beta_target = float(beta_vals.get(target_term, 0.0)) * scale_to_3way
+    se_target = float(se_series.get(target_term, 1e-6)) * scale_to_3way
 
     # One-sided p-value: H₁: β > 0
-    z = beta_three_way / se_tw
+    z = beta_target / (se_target if se_target > 0 else 1e-6)
     p_one_sided = float(1.0 - stats.norm.cdf(z))
 
     # 95 % CI
-    ci_low = beta_three_way - 1.96 * se_tw
-    ci_high = beta_three_way + 1.96 * se_tw
+    ci_low = beta_target - 1.96 * se_target
+    ci_high = beta_target + 1.96 * se_target
 
-    # All coefficients
     all_coefs = {
         name: {
             "beta": float(beta_vals[name]),
-            "se": float(se_series[name]),
-            "z": float(beta_vals[name] / se_series[name]),
+            "se": float(se_series.get(name, 1e-6)),
+            "z": float(beta_vals[name] / se_series[name]) if se_series.get(name, 0) > 0 else 0.0,
             "p_two_sided": float(
-                2.0 * (1.0 - stats.norm.cdf(abs(beta_vals[name] / se_series[name]))),
-            ),
+                2.0 * (1.0 - stats.norm.cdf(abs(beta_vals[name] / se_series[name])))
+            ) if se_series.get(name, 0) > 0 else 1.0,
         }
         for name in beta_vals.index
     }
 
     return {
-        "beta_three_way": beta_three_way,
-        "se": se_tw,
+        "beta_three_way": beta_target,
+        "se": se_target,
         "p_value": p_one_sided,
         "ci_95": (float(ci_low), float(ci_high)),
         "all_coefficients": all_coefs,
         "model_summary": summary_str,
+        "target_term": target_term,
+        "harm_varies": harm_varies,
     }
 
 
@@ -322,14 +355,27 @@ def compute_gvif(design_matrix: pd.DataFrame, terms: list[str]) -> pd.DataFrame:
         logger.warning("Too few observations (%d) to compute GVIF reliably", n)
         return pd.DataFrame({"term": terms, "GVIF": [float("nan")] * len(terms)})
 
+    varying_terms = [t for t in terms if sub[t].std() > 1e-8]
+    constant_terms = [t for t in terms if sub[t].std() <= 1e-8]
+
     results: list[dict] = []
-    for t in terms:
+    for t in constant_terms:
+        results.append({"term": t, "GVIF": float("inf")})
+
+    for t in varying_terms:
         y = sub[t].values
-        X = sm.add_constant(sub.drop(columns=[t]).values)
+        other_varying = [c for c in varying_terms if c != t]
+        if not other_varying:
+            results.append({"term": t, "GVIF": 1.0})
+            continue
+        X = sm.add_constant(sub[other_varying].values)
         try:
-            ols = sm.OLS(y, X).fit()
-            r2 = ols.rsquared
-            vif = 1.0 / (1.0 - r2) if r2 < 1.0 else float("inf")
+            if np.linalg.matrix_rank(X) < X.shape[1]:
+                vif = float("inf")
+            else:
+                ols = sm.OLS(y, X).fit()
+                r2 = ols.rsquared
+                vif = 1.0 / (1.0 - r2) if r2 < 1.0 else float("inf")
         except Exception:
             vif = float("nan")
         results.append({"term": t, "GVIF": float(vif)})

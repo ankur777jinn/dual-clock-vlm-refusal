@@ -126,15 +126,17 @@ def main():
     evaluator = GateEvaluator(Config.__dict__, margins)
 
     # Compile all inputs into chain evaluation
+    gap_ci = tuple(phase1.get("gap_ci", (phase1["L_harm_ci"][0] - phase1["L_read_ci"][1],
+                                         phase1["L_harm_ci"][1] - phase1["L_read_ci"][0])))
     all_inputs = {
-        "gate1": {
+        "phase1": {
             "L_harm": L_harm,
             "L_harm_ci": tuple(phase1["L_harm_ci"]),
             "L_read": L_read,
             "L_read_ci": tuple(phase1["L_read_ci"]),
-            "typo_results": controls.get("c5", {}),
+            "gap_ci": gap_ci,
         },
-        "gate2a": {
+        "lmm": {
             "beta_three_way": beta_three_way,
             "ci_95": ci_three_way,
             "delta_equiv": delta_equiv,
@@ -160,11 +162,10 @@ def main():
             "g_w2_ci": (0.70, 0.90),
             "attention_check_pass": True,
         },
-        "gate5": {
-            "control_results": controls,
-            "nonsafety_result": {"alpha_r_x_h": 0.0, "p_value": 0.5},
-            "capability_result": controls.get("capability", {}),
-        },
+        "controls": controls,
+        "nonsafety": {"alpha_r_x_h": 0.0, "p_value": 0.5},
+        "capability": controls.get("capability", {}),
+        "c5": controls.get("c5", {}),
     }
 
     verdict = evaluator.run_hierarchical_chain(all_inputs)
@@ -173,6 +174,29 @@ def main():
     logger.info("FINAL VERDICT: %s", verdict.outcome)
     logger.info("=" * 60)
     logger.info(verdict.narrative)
+
+    # Save verdict and all analysis summaries to JSON
+    verdict_dict = {
+        "outcome": verdict.outcome,
+        "gates_passed": [g.__dict__ for g in verdict.gates_passed],
+        "failed_gate": verdict.failed_gate.__dict__ if verdict.failed_gate else None,
+        "falsifiers_triggered": [f.__dict__ for f in verdict.falsifiers_triggered],
+        "flags": verdict.flags,
+        "narrative": verdict.narrative,
+        "lmm_results": {
+            "beta_three_way": beta_three_way,
+            "se": se_three_way,
+            "ci_95": ci_three_way,
+            "p_value": p_three_way,
+            "tost_three_way": tost_three_way,
+            "target_term": lmm_results.get("target_term"),
+            "harm_varies": lmm_results.get("harm_varies"),
+        },
+        "competitor_changepoint": competitor,
+    }
+    with open(args.output_dir / "final_verdict.json", "w") as f:
+        json.dump(verdict_dict, f, indent=2)
+    logger.info("Final verdict written to: %s", args.output_dir / "final_verdict.json")
 
     # Save summary
     summary_path = args.output_dir / "confirmatory_analysis_summary.json"

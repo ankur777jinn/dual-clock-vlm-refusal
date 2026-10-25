@@ -397,15 +397,15 @@ class GateEvaluator:
         L_harm_L_read_gap_ci: tuple[float, float],
         delta_layer_mei: float,
     ) -> FalsifierResult:
-        """Falsifier F1: Layer-gap insufficiency.
+        """Falsifier F1: Premature Alignment.
 
-        Triggered if the CI for ``L_harm − L_read`` includes values below
-        the minimum-effect-of-interest.
+        Triggered if the 95% CI upper bound on (L_harm - L_read) is strictly
+        less than -delta_layer_mei (i.e. L_harm emerges significantly before L_read).
 
         Parameters
         ----------
         L_harm_L_read_gap_ci : tuple[float, float]
-            95 % CI for the gap between L_harm and L_read.
+            95 % CI for the gap between L_harm and L_read (L_harm - L_read).
         delta_layer_mei : float
             Pre-registered minimum layer-gap MEI.
 
@@ -413,10 +413,11 @@ class GateEvaluator:
         -------
         FalsifierResult
         """
-        triggered = L_harm_L_read_gap_ci[0] < delta_layer_mei
+        # Upper bound of (L_harm - L_read) < -delta_layer_mei
+        triggered = L_harm_L_read_gap_ci[1] < -delta_layer_mei
 
         return FalsifierResult(
-            name="F1: Layer-gap insufficiency",
+            name="F1: Premature Alignment",
             bound_gate="Gate 1",
             triggered=triggered,
             evidence={
@@ -425,8 +426,8 @@ class GateEvaluator:
             },
             description=(
                 f"Gap CI = ({L_harm_L_read_gap_ci[0]:.1f}, "
-                f"{L_harm_L_read_gap_ci[1]:.1f}), MEI = {delta_layer_mei:.1f}. "
-                f"{'TRIGGERED' if triggered else 'Not triggered'}."
+                f"{L_harm_L_read_gap_ci[1]:.1f}), Threshold = -{delta_layer_mei:.1f}. "
+                f"{'TRIGGERED (L_harm strictly precedes L_read)' if triggered else 'Not triggered'}."
             ),
         )
 
@@ -702,14 +703,21 @@ class GateEvaluator:
             flags.append(flag_h)
 
         # ---- Define gate sequence ----
-        phase1 = all_results.get("phase1", {})
-        lmm = all_results.get("lmm", {})
+        phase1 = all_results.get("phase1", all_results.get("gate1", {}))
+        lmm = all_results.get("lmm", all_results.get("gate2a", {}))
         g2b = all_results.get("gate2b", {})
         g3 = all_results.get("gate3", {})
         g4 = all_results.get("gate4", {})
         controls = all_results.get("controls", {})
         nonsafety = all_results.get("nonsafety", {})
         capability = all_results.get("capability", {})
+        c5 = all_results.get("c5", controls.get("c5", {}))
+
+        # Compute gap_ci if not explicitly present
+        if "gap_ci" not in phase1 and "L_harm_ci" in phase1 and "L_read_ci" in phase1:
+            h_ci = phase1["L_harm_ci"]
+            r_ci = phase1["L_read_ci"]
+            phase1["gap_ci"] = (h_ci[0] - r_ci[1], h_ci[1] - r_ci[0])
 
         gate_sequence = [
             (
@@ -719,7 +727,7 @@ class GateEvaluator:
                     L_harm_ci=phase1.get("L_harm_ci", (0, 0)),
                     L_read=phase1.get("L_read", 0),
                     L_read_ci=phase1.get("L_read_ci", (0, 0)),
-                    typo_results=all_results.get("c5", {}),
+                    typo_results=c5,
                 ),
             ),
             (

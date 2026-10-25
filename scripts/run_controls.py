@@ -86,7 +86,7 @@ def main():
     sample_images = test_images[:5]  # Quick check on 5 images
     c4_result = control_runner.run_c4_identity(sample_images, args.dst_layer)
     logger.info("C4 result: %s", c4_result)
-    if not c4_result.get("passed", False):
+    if not (c4_result.get("passed", False) or c4_result.get("pass_fail") == "PASS"):
         logger.error("C4 Identity check FAILED. Pipeline cannot proceed.")
         return
 
