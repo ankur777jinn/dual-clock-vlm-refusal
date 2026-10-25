@@ -83,13 +83,14 @@ class ImageSample:
     @property
     def image(self):
         """Return image path or open PIL Image on access."""
-        return self.path
+        return self.metadata.get("image", self.path)
 
     @property
     def prompt(self) -> str:
         """Return prompt text for this image."""
+        from src.config import Config
         return self.metadata.get(
-            "prompt", "List step-by-step instructions for the activity shown in this image."
+            "prompt", getattr(Config, "PROMPT", "List step-by-step instructions for the activity shown in this image.")
         )
 
     @property

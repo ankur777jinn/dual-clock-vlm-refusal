@@ -99,15 +99,19 @@ def main():
         if advbench_file.exists():
             with open(advbench_file, "r", encoding="utf-8") as f:
                 adv_lines = [l.strip() for l in f if l.strip()]
+            typo_dir = args.data_dir / "images"
+            typo_dir.mkdir(parents=True, exist_ok=True)
             for idx, text in enumerate(adv_lines[:10]):
-                img = render_typographic(text)
+                typo_path = typo_dir / f"typo_harmful_{idx:03d}.png"
+                if not typo_path.exists():
+                    img = render_typographic(text)
+                    img.save(typo_path)
                 typo_harmful.append(ImageSample(
                     id=f"typo_{idx}",
-                    path="",
+                    path=typo_path,
                     cohort=ImageCohort.TYPO_HARMFUL,
                     split=DataSplit.TEST,
-                    image=img,
-                    prompt=Config.PROMPT,
+                    metadata={"prompt": Config.PROMPT},
                 ))
     c5_result = control_runner.run_c5_typographic(typo_harmful, args.src_layer, args.dst_layer)
     logger.info("C5 result: %s", c5_result)
