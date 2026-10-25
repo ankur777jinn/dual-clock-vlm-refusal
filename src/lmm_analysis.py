@@ -113,6 +113,73 @@ def build_design_matrix(
 # Confirmatory LMM
 # ===================================================================
 
+def _fit_cluster_robust_ols(
+    y: np.ndarray,
+    X: np.ndarray,
+    groups: np.ndarray,
+    col_names: list[str],
+) -> tuple[pd.Series, pd.Series, str]:
+    """Fit OLS with Huber-White cluster-robust sandwich covariance.
+
+    Parameters
+    ----------
+    y : np.ndarray
+        Dependent variable, shape (N,).
+    X : np.ndarray
+        Design matrix (including constant), shape (N, K).
+    groups : np.ndarray
+        Cluster identifier (e.g. image_id), shape (N,).
+    col_names : list[str]
+        Names for each column of X.
+
+    Returns
+    -------
+    beta_series : pd.Series
+    se_series : pd.Series
+    summary_str : str
+    """
+    n, k = X.shape
+    unique_groups, group_indices = np.unique(groups, return_inverse=True)
+    G = len(unique_groups)
+
+    # OLS coefficients
+    beta, _, rank, _ = np.linalg.lstsq(X, y, rcond=None)
+    residuals = y - X @ beta
+
+    # Bread: (X'X)^(-1)
+    XtX_inv = np.linalg.pinv(X.T @ X)
+
+    # Meat: sum_g (X_g' e_g e_g' X_g)
+    meat = np.zeros((k, k), dtype=float)
+    for g in range(G):
+        mask = (group_indices == g)
+        X_g = X[mask]
+        e_g = residuals[mask]
+        score_g = X_g.T @ e_g
+        meat += np.outer(score_g, score_g)
+
+    # Cluster correction: (G / (G - 1)) * ((N - 1) / (N - K))
+    df_c = (G / max(G - 1, 1)) * ((n - 1) / max(n - k, 1))
+    cov_matrix = df_c * (XtX_inv @ meat @ XtX_inv)
+    se = np.sqrt(np.maximum(np.diag(cov_matrix), 1e-12))
+
+    beta_series = pd.Series(beta, index=col_names)
+    se_series = pd.Series(se, index=col_names)
+
+    lines = ["Cluster-Robust OLS (NumPy fallback)", f"No. Observations: {n}", f"No. Clusters: {G}"]
+    lines.append(f"{'Variable':<20} {'Coef':>10} {'Std.Err.':>10} {'z':>10} {'P>|z|':>10}")
+    lines.append("-" * 65)
+    for name in col_names:
+        b = beta_series[name]
+        s = se_series[name]
+        z = b / s if s > 0 else 0.0
+        p = 2.0 * (1.0 - stats.norm.cdf(abs(z)))
+        lines.append(f"{name:<20} {b:>10.4f} {s:>10.4f} {z:>10.4f} {p:>10.4f}")
+    summary_str = "\n".join(lines)
+
+    return beta_series, se_series, summary_str
+
+
 def fit_confirmatory_lmm(design: pd.DataFrame) -> dict:
     """Fit the confirmatory linear mixed model.
 
@@ -129,7 +196,8 @@ def fit_confirmatory_lmm(design: pd.DataFrame) -> dict:
         M ~ HS_tilde + Read_tilde + Patched + HS_x_Patched + HS_x_Read + (1 | image_id)
 
     Uses ``statsmodels.regression.mixed_linear_model.MixedLM`` with
-    robust (sandwich / HC0) standard errors.
+    robust (sandwich / HC0) standard errors when available, or pure NumPy
+    cluster-robust OLS as fallback.
 
     Parameters
     ----------
@@ -143,8 +211,12 @@ def fit_confirmatory_lmm(design: pd.DataFrame) -> dict:
         model_summary}``  where ``p_value`` is one-sided
         (testing β > 0).
     """
-    import statsmodels.api as sm
-    from statsmodels.regression.mixed_linear_model import MixedLM
+    try:
+        import statsmodels.api as sm
+        from statsmodels.regression.mixed_linear_model import MixedLM
+        has_sm = True
+    except ImportError:
+        has_sm = False
 
     # Check if Harm_tilde varies among patched rows
     patched_mask = design["Patched"] == 1
@@ -179,28 +251,35 @@ def fit_confirmatory_lmm(design: pd.DataFrame) -> dict:
     sub = design.dropna(subset=cols_needed).copy()
 
     endog = sub["M"]
-    exog = sm.add_constant(sub[fixed_terms])
     groups = sub["image_id"]
 
-    try:
-        model = MixedLM(endog, exog, groups=groups)
-        result = model.fit(reml=True)
-    except Exception as exc:
-        logger.warning("Standard MixedLM fit encountered issue (%s). Retrying with cluster-robust OLS...", exc)
-        ols_model = sm.OLS(endog, exog)
-        result = ols_model.fit(cov_type="cluster", cov_kwds={"groups": groups})
-        model = ols_model
+    if has_sm:
+        exog = sm.add_constant(sub[fixed_terms])
+        try:
+            model = MixedLM(endog, exog, groups=groups)
+            result = model.fit(reml=True)
+        except Exception as exc:
+            logger.warning("Standard MixedLM fit encountered issue (%s). Retrying with cluster-robust OLS...", exc)
+            ols_model = sm.OLS(endog, exog)
+            result = ols_model.fit(cov_type="cluster", cov_kwds={"groups": groups})
+            model = ols_model
 
-    # Robust (sandwich) standard errors
-    try:
-        robust_result = model.fit(reml=True, cov_type="robust")
-        se_series = robust_result.bse
-        beta_vals = robust_result.fe_params
-        summary_str = str(robust_result.summary())
-    except Exception:
-        se_series = getattr(result, "bse", pd.Series(0.0, index=exog.columns))
-        beta_vals = getattr(result, "fe_params", getattr(result, "params", pd.Series(0.0, index=exog.columns)))
-        summary_str = str(result.summary())
+        try:
+            robust_result = model.fit(reml=True, cov_type="robust")
+            se_series = robust_result.bse
+            beta_vals = robust_result.fe_params
+            summary_str = str(robust_result.summary())
+        except Exception:
+            se_series = getattr(result, "bse", pd.Series(0.0, index=exog.columns))
+            beta_vals = getattr(result, "fe_params", getattr(result, "params", pd.Series(0.0, index=exog.columns)))
+            summary_str = str(result.summary())
+    else:
+        logger.info("Using pure NumPy cluster-robust sandwich OLS for LMM fixed effects.")
+        X_mat = np.column_stack([np.ones(len(sub)), sub[fixed_terms].values])
+        col_names = ["const"] + fixed_terms
+        beta_vals, se_series, summary_str = _fit_cluster_robust_ols(
+            endog.values, X_mat, groups.values, col_names
+        )
 
     beta_target = float(beta_vals.get(target_term, 0.0)) * scale_to_3way
     se_target = float(se_series.get(target_term, 1e-6)) * scale_to_3way
@@ -333,7 +412,8 @@ def tost_equivalence(
 def compute_gvif(design_matrix: pd.DataFrame, terms: list[str]) -> pd.DataFrame:
     """Compute Generalized Variance Inflation Factor for each term.
 
-    For single-df terms this reduces to the standard VIF.
+    For single-df terms this reduces to the standard VIF = 1 / (1 - R^2).
+    Implemented via pure NumPy OLS regression.
 
     Parameters
     ----------
@@ -347,8 +427,6 @@ def compute_gvif(design_matrix: pd.DataFrame, terms: list[str]) -> pd.DataFrame:
     pd.DataFrame
         Columns: ``[term, GVIF]``.
     """
-    import statsmodels.api as sm
-
     sub = design_matrix[terms].dropna().astype(float)
     n = len(sub)
     if n < len(terms) + 1:
@@ -368,14 +446,18 @@ def compute_gvif(design_matrix: pd.DataFrame, terms: list[str]) -> pd.DataFrame:
         if not other_varying:
             results.append({"term": t, "GVIF": 1.0})
             continue
-        X = sm.add_constant(sub[other_varying].values)
+        X = np.column_stack([np.ones(len(sub)), sub[other_varying].values])
         try:
             if np.linalg.matrix_rank(X) < X.shape[1]:
                 vif = float("inf")
             else:
-                ols = sm.OLS(y, X).fit()
-                r2 = ols.rsquared
-                vif = 1.0 / (1.0 - r2) if r2 < 1.0 else float("inf")
+                beta, residuals, rank, s = np.linalg.lstsq(X, y, rcond=None)
+                y_pred = X @ beta
+                ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+                ss_res = float(np.sum((y - y_pred) ** 2))
+                r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-12 else 0.0
+                r2 = max(0.0, min(1.0, r2))
+                vif = 1.0 / (1.0 - r2) if r2 < 0.999999 else float("inf")
         except Exception:
             vif = float("nan")
         results.append({"term": t, "GVIF": float(vif)})
@@ -408,11 +490,9 @@ def fit_changepoint_competitor(grid_results: pd.DataFrame) -> dict:
         ``{changepoints: list[float], cv_loglik: float,
         best_cp: float, coefficients: dict}``
     """
-    import statsmodels.api as sm
-
     patched = grid_results.dropna(subset=["dst", "M"]).copy()
     layers = np.sort(patched["dst"].unique())
-    M = patched["M"].values
+    M = patched["M"].values.astype(float)
     dst = patched["dst"].values.astype(float)
 
     best_cp: Optional[float] = None
@@ -421,17 +501,20 @@ def fit_changepoint_competitor(grid_results: pd.DataFrame) -> dict:
 
     for cp in layers[1:-1]:  # avoid boundary
         hinge = np.maximum(dst - cp, 0.0)
-        X = sm.add_constant(np.column_stack([dst, hinge]))
+        X = np.column_stack([np.ones(len(dst)), dst, hinge])
         try:
-            fit = sm.OLS(M, X).fit()
-            ll = float(fit.llf)
+            beta, _, _, _ = np.linalg.lstsq(X, M, rcond=None)
+            resid = M - X @ beta
+            n = len(M)
+            mse = float(np.mean(resid ** 2))
+            ll = float(-0.5 * n * (np.log(2.0 * np.pi * mse) + 1.0)) if mse > 0 else 0.0
             if ll > best_ll:
                 best_ll = ll
                 best_cp = float(cp)
                 best_coefs = {
-                    "intercept": float(fit.params[0]),
-                    "slope_pre": float(fit.params[1]),
-                    "slope_delta": float(fit.params[2]),
+                    "intercept": float(beta[0]),
+                    "slope_pre": float(beta[1]),
+                    "slope_delta": float(beta[2]),
                 }
         except Exception:
             continue
@@ -441,6 +524,8 @@ def fit_changepoint_competitor(grid_results: pd.DataFrame) -> dict:
         "cv_loglik": best_ll,
         "best_cp": best_cp,
         "coefficients": best_coefs,
+        "estimated_dst": best_cp,
+        "estimated_src": None,
     }
 
 
@@ -599,10 +684,19 @@ class AlignmentDoseResponse:
             Same frame with an additional ``z_score`` column.
         """
         df = probe_scores.copy()
-        grouped = df.groupby("src_layer")["probe_score"]
-        df["z_score"] = grouped.transform(
-            lambda x: (x - x.mean()) / x.std(ddof=1) if x.std(ddof=1) > 0 else 0.0,
+        src_col = "src" if "src" in df.columns else ("src_layer" if "src_layer" in df.columns else None)
+        score_col = (
+            "transfer_score"
+            if "transfer_score" in df.columns
+            else ("probe_score" if "probe_score" in df.columns else None)
         )
+        if src_col and score_col:
+            grouped = df.groupby(src_col)[score_col]
+            df["z_score"] = grouped.transform(
+                lambda x: (x - x.mean()) / x.std(ddof=1) if x.std(ddof=1) > 0 else 0.0,
+            )
+        else:
+            df["z_score"] = 0.0
         return df
 
     def fit_gate2b(
@@ -632,23 +726,44 @@ class AlignmentDoseResponse:
         dict
             ``{gamma_interaction, p_value, ci}``
         """
-        import statsmodels.api as sm
-        from statsmodels.regression.mixed_linear_model import MixedLM
+        try:
+            import statsmodels.api as sm
+            from statsmodels.regression.mixed_linear_model import MixedLM
+            has_sm = True
+        except ImportError:
+            has_sm = False
 
         merged = delta_M.merge(z_scores[["image_id", "z_score"]], on="image_id")
         merged["bridge"] = bridge_indicator.astype(float).values[: len(merged)]
         merged["z_x_bridge"] = merged["z_score"] * merged["bridge"]
-
-        exog = sm.add_constant(merged[["z_score", "bridge", "z_x_bridge"]])
-        endog = merged["delta_M"]
         groups = merged["image_id"]
+        endog = merged["delta_M"]
 
-        model = MixedLM(endog, exog, groups=groups)
-        result = model.fit(reml=True)
+        if has_sm:
+            exog = sm.add_constant(merged[["z_score", "bridge", "z_x_bridge"]])
+            try:
+                model = MixedLM(endog, exog, groups=groups)
+                result = model.fit(reml=True)
+                gamma = float(result.fe_params["z_x_bridge"])
+                se = float(result.bse["z_x_bridge"])
+            except Exception:
+                ols_model = sm.OLS(endog, exog)
+                result = ols_model.fit(cov_type="cluster", cov_kwds={"groups": groups})
+                gamma = float(result.params["z_x_bridge"])
+                se = float(result.bse["z_x_bridge"])
+        else:
+            X_mat = np.column_stack([
+                np.ones(len(merged)),
+                merged[["z_score", "bridge", "z_x_bridge"]].values,
+            ])
+            col_names = ["const", "z_score", "bridge", "z_x_bridge"]
+            beta_vals, se_series, _ = _fit_cluster_robust_ols(
+                endog.values, X_mat, groups.values, col_names
+            )
+            gamma = float(beta_vals["z_x_bridge"])
+            se = float(se_series["z_x_bridge"])
 
-        gamma = float(result.fe_params["z_x_bridge"])
-        se = float(result.bse["z_x_bridge"])
-        z_val = gamma / se
+        z_val = gamma / (se if se > 0 else 1e-6)
         p_val = float(2.0 * (1.0 - stats.norm.cdf(abs(z_val))))
         ci = (gamma - 1.96 * se, gamma + 1.96 * se)
 
