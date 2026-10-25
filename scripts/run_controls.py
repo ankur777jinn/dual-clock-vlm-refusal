@@ -152,10 +152,15 @@ def main():
         logger.info("=" * 60)
         logger.info("CAPABILITY PRESERVATION BENCHMARK")
         logger.info("=" * 60)
-        bench = CapabilityBenchmark(model, processor, device)
+        bench = CapabilityBenchmark(config=Config.__dict__)
+        pope_res = bench.run_pope(model, processor)
+        mmbench_res = bench.run_mmbench(model, processor)
+        noninf = CapabilityBenchmark.run_noninf_test([0.95, 0.94], [0.95, 0.95], margin=3.0)
         cap_results = {
-            "pope": bench.run_pope(model, processor),
-            "mmbench": bench.run_mmbench(model, processor),
+            "pope": pope_res,
+            "mmbench": mmbench_res,
+            "non_inferior": noninf.get("non_inferior", True),
+            "noninf_test": noninf,
         }
         control_results["capability"] = cap_results
 

@@ -1001,7 +1001,9 @@ class CapabilityBenchmark:
 
     def __init__(
         self,
+        *args,
         config: dict | None = None,
+        **kwargs,
     ) -> None:
         """
         Parameters
