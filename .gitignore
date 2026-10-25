@@ -32,7 +32,9 @@ venv.bak/
 
 # Data and large outputs
 data/
-outputs/
+outputs/*
+!outputs/figures/
+!outputs/final_verdict/
 .cache/
 *.parquet
 *.pt

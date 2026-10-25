@@ -1,0 +1,19 @@
+{
+  "outcome": "FALSIFIED",
+  "gates_passed": [],
+  "failed_gate": "Gate 1: Two-clock existence",
+  "falsifiers_triggered": [
+    "F1: Premature Alignment"
+  ],
+  "flags": [
+    "CONSTRUCT FLAG: C1d spatial-shuffle retention CI (0.989, 1.016) includes 1.0 \u2013 spatial structure may not carry refusal-relevant information."
+  ],
+  "narrative": "Chain stopped at Gate 1: Two-clock existence. Falsifier triggered \u2192 hypothesis FALSIFIED.\nGates passed: 0 / 6.\n  \u2717 Gate 1: Two-clock existence: L_read=26 CI=(26, 26), L_harm=6 CI=(6, 6). CIs separated: False. Order correct: False. Typo baseline refusal: 100.00%.\n  \u26a0 F1: Premature Alignment: Gap CI = (-20.0, -20.0), Threshold = -1.5. TRIGGERED (L_harm strictly precedes L_read).\n  \ud83d\udea9 CONSTRUCT FLAG: C1d spatial-shuffle retention CI (0.989, 1.016) includes 1.0 \u2013 spatial structure may not carry refusal-relevant information.",
+  "beta_three_way": -0.6590606119175128,
+  "ci_three_way": [
+    -0.7043994560491571,
+    -0.6137217677858684
+  ],
+  "delta_equiv": 0.037237334052000984,
+  "sigma_M_pooled": 0.14894933620800394
+}
