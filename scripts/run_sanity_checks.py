@@ -41,21 +41,29 @@ def run_hook_positive_control(model, processor, device):
     comp_ids = [tok.encode(t, add_special_tokens=False)[0] for t in Config.COMPLIANCE_TOKENS]
 
     # Clean forward baseline
+    inputs = runner._prepare_inputs(test_img, prompt)
+    input_ids = inputs["input_ids"]
     clean_M = runner.compute_logit_mass(test_img, prompt, ref_ids, comp_ids)
-    logger.info("Clean baseline M = %.4f", clean_M)
+    
+    with torch.no_grad():
+        gen_ids = model.generate(**inputs, max_new_tokens=32)
+        gen_text = processor.decode(gen_ids[0][input_ids.shape[1]:], skip_special_tokens=True)
+    logger.info("Clean baseline M = %.4f | Generation: %r", clean_M, gen_text)
 
     dst_layers = [6, 10, 12, 14]
     results = {}
 
-    for dst in dst_layers:
-        inputs = runner._prepare_inputs(test_img, prompt)
-        input_ids = inputs["input_ids"]
-        img_token_id = model.config.image_token_id
-        img_indices = (input_ids[0] == img_token_id).nonzero(as_tuple=True)[0].tolist()
+    img_token_id = getattr(model.config, "image_token_id", 151655)
+    img_indices = (input_ids[0] == img_token_id).nonzero(as_tuple=True)[0].tolist()
+    hidden_dim = getattr(
+        model.config,
+        "hidden_size",
+        getattr(getattr(model.config, "text_config", None), "hidden_size", 3584),
+    )
+    logger.info("Image tokens count: %d, Hidden dim: %d", len(img_indices), hidden_dim)
 
+    for dst in dst_layers:
         # Generate large random perturbation (positive control)
-        # Hidden dimension for Qwen2.5-VL-7B is 3584
-        hidden_dim = model.config.hidden_size
         noise_activations = torch.randn(1, len(img_indices), hidden_dim, dtype=torch.bfloat16, device=device) * 5.0
 
         # Inject noise at dst using exact BackPatchHook implementation
@@ -113,6 +121,37 @@ def main():
     processor = AutoProcessor.from_pretrained(Config.MODEL_ID)
 
     run_hook_positive_control(model, processor, torch.device(args.device))
+
+    # Real Dataset Samples Inspection
+    logger.info("=" * 60)
+    logger.info("CHECK 3: REAL DATASET GENERATION & BASELINE CHECK")
+    logger.info("=" * 60)
+    manifest_path = args.data_dir / "manifest.csv"
+    if manifest_path.exists():
+        import csv
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            reader = list(csv.DictReader(f))
+        logger.info("Manifest has %d total samples", len(reader))
+        runner = PrefillRunner(model, processor, torch.device(args.device))
+        tok = processor.tokenizer
+        ref_ids = [tok.encode(t, add_special_tokens=False)[0] for t in Config.REFUSAL_TOKENS]
+        comp_ids = [tok.encode(t, add_special_tokens=False)[0] for t in Config.COMPLIANCE_TOKENS]
+        
+        hs_samples = [r for r in reader if r.get("cohort", "").lower() == "hs"][:3]
+        ss_samples = [r for r in reader if r.get("cohort", "").lower() == "ss"][:2]
+        
+        for s in hs_samples + ss_samples:
+            img_p = args.data_dir / s["path"]
+            if img_p.exists():
+                im = Image.open(img_p).convert("RGB")
+                m_val = runner.compute_logit_mass(im, Config.PROMPT, ref_ids, comp_ids)
+                inp = runner._prepare_inputs(im, Config.PROMPT)
+                with torch.no_grad():
+                    g_ids = model.generate(**inp, max_new_tokens=32)
+                    g_text = processor.decode(g_ids[0][inp["input_ids"].shape[1]:], skip_special_tokens=True)
+                logger.info("Sample %s (%s): M = %.4f | Gen: %r", s["id"], s["cohort"], m_val, g_text.strip())
+    else:
+        logger.warning("Manifest %s not found", manifest_path)
 
 
 if __name__ == "__main__":
