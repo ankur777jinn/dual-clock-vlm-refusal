@@ -11,9 +11,12 @@ Phase 0 Sanity Checks:
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 from PIL import Image
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import Config
 from src.patching_engine import BackPatchHook, PrefillRunner
@@ -53,23 +56,13 @@ def run_hook_positive_control(model, processor, device):
         # Generate large random perturbation (positive control)
         # Hidden dimension for Qwen2.5-VL-7B is 3584
         hidden_dim = model.config.hidden_size
-        noise_activations = torch.randn(len(img_indices), hidden_dim, dtype=torch.bfloat16, device=device) * 5.0
+        noise_activations = torch.randn(1, len(img_indices), hidden_dim, dtype=torch.bfloat16, device=device) * 5.0
 
-        # Inject noise at dst
+        # Inject noise at dst using exact BackPatchHook implementation
         hook = BackPatchHook(model, src_layer=dst + 2, dst_layer=dst, image_token_indices=img_indices)
         
-        # Test forward with noise injection
         with torch.no_grad():
-            hook_handle = None
-            def inject_hook(module, args):
-                h = args[0].clone()
-                h[0, img_indices, :] = noise_activations
-                return (h,) + args[1:]
-            
-            hook_handle = model.model.layers[dst].register_forward_pre_hook(inject_hook)
-            out = model(**inputs)
-            hook_handle.remove()
-
+            out = hook.patch_and_forward(inputs, noise_activations)
             logits = out.logits[0, -1, :].float()
             noisy_M = compute_logit_mass(logits, ref_ids, comp_ids)
 
